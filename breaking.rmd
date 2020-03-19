@@ -27,6 +27,7 @@ library(readr)
 library(dplyr)
 library(keras)
 library(tidyr)
+library(beepr)
 ```
 
 ```{r}
@@ -37,24 +38,24 @@ oil <- read_csv('C:\\Users\\Christopher\\Desktop\\Data\\oil_prices.csv')
 head(oil)
 ```
 
-```{r}
+```{r warning=FALSE}
 oil <- oil %>%
   rename(price = DCOILBRENTEU) %>%
   mutate(price = as.numeric(price)) %>%
   mutate(change64_days = lag(price, 64) ) %>%
-  mutate (id = (1 - 64):( nrow(oil) - 64) ) %>%
   drop_na() %>%
   mutate (change64_days = price - change64_days )
+oil <- oil %>%
+  mutate (id = 1:nrow(oil) )
 summary(oil)
 ```
 
 ```{r}
 timesteps = 32
 batch_size = 64
-epochs = 120
-```
-
-```{r}
+epochs = 60
+# 60 epochs should be enough, see little improvement going to 120.  Funny results with 40
+##########################################
 past <- NULL
 future <- NULL
 temp <- oil[32:NROW(oil), 'price']
@@ -83,7 +84,7 @@ past <- array(past,c(dim(past)[1], dim(past)[2], 1))
 ```
 
 
-```{r}
+```{r, batch_parameters}
 train_share <- 0.90
 batches <- dim(future)[1] / batch_size
 train_batches <- as.integer((batches - 1) * 0.9)
@@ -95,14 +96,28 @@ future_start <- test_end +1
 future_end <- dim(future)[2]
 ```
 
-```{r}
-model <- keras_model_sequential() %>%
+```{r warning=FALSE}
+model_11v <- keras_model_sequential() %>%
   layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
   layer_dropout(0.2) %>%
   layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
   layer_dropout(0.2) %>%
   layer_dense(1)
-summary(model)
+summary(model_11v)
+# dropout of 0.5 too high, stick to 0.2 or lower
+```
+
+```{r, model_2v}
+model_2v <- model_11v
+summary(model_2v)
+```
+```{r, simple_model}
+simple_model <- keras_model_sequential() %>%
+  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
+  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
+  layer_dense(1)
+simple_model_2v <- simple_model
+summary(simple_model)
 ```
 
 ```{r}
@@ -111,7 +126,18 @@ train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
 
 train_y <- future[1:train_end,,]
 train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
-model %>% 
+
+#test_X <- past[test_start:test_end,,]
+#test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+
+#test_y <- future[test_start:test_end,,]
+#test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+```
+
+
+```{r}
+# setting verbose = 0, as otherwise the output is excessive.  Using beepr to give audible progress update
+model_11v %>% 
   compile(
     loss = 'mse',
     optimizer = 'adam'
@@ -121,19 +147,25 @@ model %>%
     batch_size = batch_size,
     x = train_X,
     y = train_y,
-    validation_split = (11 / 111)
+    validation_split = (11 / 111),
+    verbose = 0,
+  )
+beep(11)
+model_2v %>%
+    compile(
+    loss = 'mse',
+    optimizer = 'adam'
+) %>%
+  fit(
+    epochs = epochs,
+    batch_size = batch_size,
+    x = train_X,
+    y = train_y,
+    validation_split = (2 / 111),
+    verbose = 0
 #    validation_data = c(test_X, test_y)
   )
-```
-```{r}
-simple_model <- keras_model_sequential() %>%
-  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-  layer_dense(1)
-summary(simple_model)
-```
-
-```{r}
+beep(11)
 simple_model %>% 
   compile(
     loss = 'mse',
@@ -143,9 +175,26 @@ simple_model %>%
     epochs = epochs,
     batch_size = batch_size,
     x = train_X,
-    y = train_y
+    y = train_y,
+    verbose = 0
   )
+beep(11)
+simple_model_2v %>%
+  compile(
+    loss = 'mse',
+    optimizer = 'adam'
+) %>%
+  fit(
+    epochs = epochs,
+    batch_size = batch_size,
+    x = train_X,
+    y = train_y,
+    validation_split = 2 / 111,
+    verbose = 0
+  )
+beep(8)
 ```
+
 
 ```{r}
 test_X <- past[test_start:test_end,,]
@@ -154,40 +203,62 @@ test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
 test_y <- future[test_start:test_end,,]
 test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
 
-pred <- predict(model, past, batch_size = 64)
-model %>%
-  evaluate(batch_size = 64,test_X, test_y, verbose = 0)
-```
-```{r}
-simple_pred <- predict(simple_model, past, batch_size = 64)
-model %>%
-  evaluate(batch_size = 64, test_X, test_y, verbose = 0)
+pred_11v <- predict(model_11v, test_X, batch_size = 64)
+pred_2v <- predict(model_2v, test_X, batch_size = 64)
+pred_simple <- predict(simple_model, test_X, batch_size = 64)
+pred_simple_2v <- predict(simple_model_2v, test_X, batch_size = 64)
 ```
 
+```{r}
+losses <- rep(NaN, 3)
+losses[1] <- model_11v %>%
+  evaluate(batch_size = 64,test_X, test_y)
+losses[2] <- model_2v %>%
+  evaluate(batch_size = 64,test_X, test_y)
+losses[3] <- simple_model %>%
+  evaluate(batch_size = 64,test_X, test_y)
+losses[4] <- simple_model_2v %>%
+  evaluate(batch_size = 64,test_X, test_y)
+print(  paste( 'Losses for model with 11 validation batches, and  2 dropout layers:', losses[1] )  )
+print(  paste( 'Losses for model with  2 validation batches, and  2 dropout layers:', losses[2] )  )
+print(  paste( 'Losses for model with no validation batches, and no dropout layers:', losses[3] )  )
+print(  paste( 'Losses for model with  2 validation batches, but no dropout layers:', losses[4] )  )
+```
 
 ```{r}
 R2 <- function(y, yhat){
   return((1 - sum( ( y - yhat )^2 ) / sum( ( y - mean(y) )^2 ) ) * 100)
 }
-```
-
-```{r}
-print(paste('R-Squared for all test data:', R2(future[test_start:test_end,,], pred[test_start:test_end,,] )) )
-for (i in 1:32){
-  print(paste('At',i,'R-Squared:',R2(future[test_start:test_end,i,], pred[test_start:test_end,i,])))
+Rowwise_R2<- function(y, yhat, steps){
+  print(paste('R-Squared for all test data:', R2(y, yhat ) ) )
+  if (length(dim(y)) == 3){
+    for (i in 1:32){
+      print(paste('At',i,'R-Squared:',R2(y[,i,], yhat[,i,])))
+    }  
+  }
+  else if (length(dim(y)) == 2){
+    for (i in 1:32){
+      print(paste('At',i,'R-Squared:',R2(y[,i], yhat[,i])))
+    }    
+  }
 }
 ```
 
 ```{r}
-print(paste('R-Squared for all test data:', R2(future[test_start:test_end,,], simple_pred[test_start:test_end,,] )) )
-for (i in 1:32){
-  print(paste('At',i,'R-Squared:',R2(future[test_start:test_end,i,], simple_pred[test_start:test_end,i,])))
-}
+print('For 11 Validation Batches')
+Rowwise_R2(future[test_start:test_end,,], pred_11v[test_start:test_end,,] )
+print('')
+print('For 2 Validation Batches')
+Rowwise_R2(future[test_start:test_end,,], pred_2v[test_start:test_end,,] )
+print('')
+print('For No Validation Batches')
+Rowwise_R2(future[test_start:test_end,,], pred_simple[test_start:test_end,,] )
+print('')
+print('For 2 Validation Batches But No Dropout Layer')
+Rowwise_R2(future[test_start:test_end,,], pred_simple_2v[test_start:test_end,,] )
 ```
 
-
-
-```{r}
+```{r, tensorplot}
 tensorplot <- function(y, yhat, xStart = 1, xEnd = NA,x = NA, ySlice = NA, actual = 1){
   timesteps <- dim(y)[2]
   if (all(is.na(xEnd) ) ){
@@ -205,7 +276,9 @@ tensorplot <- function(y, yhat, xStart = 1, xEnd = NA,x = NA, ySlice = NA, actua
   if (all(is.na(ySlice) ) ){
     ySlice = 1:dim(y)[2]
   }
-  plot(range(x), range(yhat[,ySlice,1] ), type = 'n')
+  yRange <- range(c(range(y[,ySlice,1], na.rm = TRUE),range(yhat[,ySlice,1], na.rm = TRUE)))
+#  print(yRange)
+  plot(range(x), yRange, type = 'n')
   increment <- 360 / length(ySlice)
   hue <- 0
   for (i in ySlice){
@@ -223,30 +296,249 @@ tensorplot <- function(y, yhat, xStart = 1, xEnd = NA,x = NA, ySlice = NA, actua
 }
 ```
 
-
 ```{r}
-tensorplot(future, pred, xStart = test_start, ySlice = c(2) )
+tensorplot(future, pred_2v, xStart = test_start, ySlice = c(2) )
+tensorplot(future, pred_11v, xStart = test_start, ySlice = c(2) )
+tensorplot(future, pred_simple, xStart = test_start, ySlice = c(2) )
+tensorplot(future, pred_simple_2v, xStart = test_start, ySlice = c(2) )
 #tensorplot(future, future, xStart = test_start, xEnd = 7000, ySlice = c(15) )
 ```
+
+## Initial Results w/ Validation Data
+
+Splitting the training data into training and validation data does not seem to affect performance unless a dropout layer is included.  However, doing so in this case at lest is resulting in significantly worse performance.   
+
 ```{r}
 tensorplot(future, simple_pred, xStart = test_start, ySlice = c(2) )
 ```
+# Breaking Attempt
 
+The data suggests a breaking point around 5810 to 5928 would be a good place to try to break the model, so we will try breaking our model here.  So far, we have been using 60 epochs, but if we were to test 100 points within that range, that would be the equivalent of 6000 epochs--far too many.  Instead, we'll select two points to run the model, choose the one that performs worst (the goal is to find a breaking point after all), then select two more models near that point.
 
+BUILD A HEAP
 
-```{r}
-y_sim <- seq(from = 1, to = 6000) / 1500 +
-  c(rep(1, 200), rep(2, 1800), rep(1, 200),rep(3, 800),rep(2, 200), rep(5, 1000), rep (10, 1800)) +
-  rnorm(n = 6000, mean = 0, sd = 1)
-y_sim <- (y_sim - min(y_sim) ) / (max(y_sim) - min(y_sim) )
+```{r, test_model}
+quick_model <- function(dropout = FALSE){
+  if (dropout){
+    model <- keras_model_sequential() %>%
+    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
+    layer_dropout(0.2) %>%
+    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
+    layer_dropout(0.2) %>%
+    layer_dense(1)
+  }
+  else{
+    model <- keras_model_sequential() %>%
+    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
+    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
+    layer_dense(1)
+  }
+  return(model)
+}
 ```
 
 ```{r}
-max(y_sim)
+# starting wtih 6 epochs for testing...will increase to 60 when time to actually run this
+break_iteration <- function ( train_X, train_y, val_batches = 0, batch_size = 64, epochs = 60, noisy = FALSE, ...){
+  dropout <- (val_batches > 0 )
+  model <- quick_model(dropout)
+  model %>%
+    compile(
+    loss = 'mse',
+    optimizer = 'adam'
+    ) %>%
+    fit(
+      epochs = epochs,
+      batch_size = batch_size,
+      x = train_X,
+      y = train_y,
+      validation_split = (val_batches / train_batches),
+      ...
+    )
+  if (noisy){
+    beep(sound = 11)
+  }
+  return(model)
+}
 ```
 
 
+```{r}
+#divide = 5810
+divide = 5665
+step = 64
+train_batches = as.integer(divide / batch_size)
+test_batches = 100 - train_batches
 
+dr = divide + step # divide right, or in the first case, center
+
+start <- dr - batch_size * train_batches
+end <- dr + test_batches * batch_size - 1
+
+train_X <- past[start:(dr - 1),,]
+train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
+
+train_y <- future[start:(dr - 1),,]
+train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
+
+test_X <- past[dr: end,,]
+test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+
+test_y <- future[dr:end,,]
+test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+
+
+m <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE)
+center_loss <- m %>%
+  evaluate(batch_size = 64, test_X, test_y, verbose = 0)
+worst <- m
+
+step <- 32
+old_divide <- dr
+while (step >= 1){
+  # set divide left and divide right
+  dl <- old_divide - step
+  dr <- old_divide + step
+
+  # check left
+  start <- dl - batch_size * train_batches
+  end <- dl + test_batches * batch_size -1
+
+  train_X <- past[start:(dl - 1),,]
+  train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
+  
+  train_y <- future[start:(dl - 1),,]
+  train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
+  
+  test_X <- past[dl: end,,]
+  test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+  
+  test_y <- future[dl:end,,]
+  test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+  
+  ml <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE )
+  left_loss <- ml %>%
+    evaluate(batch_size = 64,test_X, test_y)
+
+  # check right
+  start <- dr - batch_size * train_batches
+  end <- dr + test_batches * batch_size -1
+  
+  train_X <- past[start:(dr - 1),,]
+  train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
+  
+  train_y <- future[start:(dr - 1),,]
+  train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
+  
+  test_X <- past[dr: end,,]
+  test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+  
+  test_y <- future[dr:end,,]
+  test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+  
+  mr <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE )
+  right_loss <- mr %>%
+    evaluate(batch_size = 64,test_X, test_y)
+  
+  # compare and updade
+  losses <- c(center_loss, left_loss, right_loss)
+  if (  left_loss == max(losses)  ){
+    old_divide <- dl
+    center_loss <- left_loss
+    worst <- ml
+  }
+  else if (  right_loss == max(losses)  ){
+    old_divide <- dr
+    center_loss <- right_loss
+    worst <- mr
+  }
+  step <- step / 2
+}
+beep(sound = 3)
+wait(3)
+beep(sound = 4)
+
+
+```
+
+```{r}
+center_loss
+old_divide
+start <- old_divide - batch_size * train_batches
+end <- old_divide + test_batches * batch_size -1
+  
+test_X <- past[old_divide: end,,]
+test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+  
+test_y <- future[old_divide:end,,]
+test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+
+yhat <- predict(worst, test_X, batch_size = 64)
+Rowwise_R2(test_y, yhat)
+```
+
+```{r}
+col <- hcl(h = 120, c = 35, l = 85, alpha = 0.4)
+plot(oil[,c(4,2)], col = col, pch = 19, cex = 0.5)
+abline(v = old_divide)
+```
+
+
+```{r}
+plot(oil[(divide):(divide + 128),c(4,2)])
+abline(v = old_divide, col = 'red')
+abline(v = 5665, col = 'blue')
+abline(v = 5665 + 128, col = 'blue')
+```
+
+```{r}
+plot(oil[(divide):(divide + 128),c(4,3)])
+abline(v = old_divide, col = 'red')
+abline(v = 5665, col = 'blue')
+abline(v = 5665 + 128, col = 'blue')
+```
+
+## Prelimary Findings
+
+Looking at the data, it would seem that placing the division point at the start of a spike is the most effective way to break an LSTM model.  
+
+
+
+## Simulating Data
+
+Given our findings with oil, let's see if we can simulate some data.  
+
+```{r}
+fibX <- function(n, x = 2){
+  if (n > 0){
+    v <- fibX(n-1, x)
+  }
+  else {
+    return(1)
+  }
+  l <- length(v)
+  if ( l <= x ){
+    return(c(v,sum(v) ) )
+  }
+  else{
+    m <- sum(v[(l-x+1):l])
+    return(c(v,m))
+  }
+}
+```
+
+
+```{r}
+#1:6000 * rnorm(6000)
+#y_sim <- seq(from = 1, to = 6000) / 1500 +
+#  c(rep(1, 200), rep(2, 1800), rep(1, 200),rep(3, 800),rep(2, 200), rep(5, 1000), rep (10, 1800)) +
+#  rnorm(n = 6000, mean = 0, sd = 1)
+#y_sim <- (y_sim - min(y_sim) ) / (max(y_sim) - min(y_sim) )
+```
+
+```{r}
+#max(y_sim)
+```
 
 ## Performance
 
