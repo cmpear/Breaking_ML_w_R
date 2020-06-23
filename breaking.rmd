@@ -11,34 +11,62 @@ The goal of this project is to explore stateful LSTM models.  The two underlying
 
 ### Validation Data and Stateful Models
 
-Unlike for non-stateful models, tutorials for stateful models rarely include the use of validation data.  One possible reason for this is that stateful models, unlike normal models, doe not divide their data into groups randomly.  Data is fed into the model in order from earliest to latest (or sometimes the reverse).  Thus, the training data is the most in the past, and the testing data is the most recent.  Any validation data would have to consist of blocks of data in between those two, and would not be random.  Thus, validation data would present two dangers: overfitting on the validation data itself, and a gap between training and testing data.
+Do non-stateful models perform better with or without validation data?  On the one hand, validation data helps to avoid the issue of overfitting.  On the other hand, stateful models do not allow one to randomly divide data into training, validation and testing sets.  Diverting some of the data into validation data could make the trained model less reliable.  It would be interesting to see which one of these is true.
 
 ### Breaking a Model
 
-When running some tests with stock data, there were a few cases where the model thoroughly failed and the predictions yielded negative R-Squared values.  One common feature of those cases was that the division between training and testing data coincided with a sudden spike in the stock price, which was followed by a period with a new average.  Do these conditions consistently break the model?  And can we clarify the conditions for breaking the model?
-
+When runnings tests wtih stock data, I observed appalling metrics for a few of those models.  On closer inspection, I found that those models tended to have splits between training and testing sets that coincided with a sudden rise in stock price that was followed with a plateau following it.  Could placing the dividing line in a similar place for a larger dataset yield similarly bad results?
 
 ## Oil Price Data
 
-For testing these hypotheses, we are going to make use of a dataset of oil prices since 1989.  The dataset was chosen because it is not only data of interest, but also because the data is rich, and the price of oil experienced several sudden climbs followed by long plateaus.  Thus, if we are trying to choose a dividing line between training and test data that could cause the model to fail, there should be several good options with enough data to train and test the model. 
+For testing these hypotheses, we are going to make use of a dataset of oil prices since 1989.  Not only is the data important to the world economy, it is also rich and contains a number of sudden climbs followed by long plataeus.
 
-```{r}
+```{r, imports}
 library(readr)
 library(dplyr)
 library(keras)
 library(tidyr)
 library(beepr)
+library(rlist)
+library(fs)
+library(stringr)
+library(ggplot2)
 ```
 
-```{r}
-# not built for laptop yet
+```{r, functions}
+R2 <- function(y, yhat){
+  return((1 - sum( ( y - yhat )^2 ) / sum( ( y - mean(y) )^2 ) ) * 100)
+}
+Rowwise_R2<- function(y, yhat, steps){
+  r <- R2(y,yhat)
+  if (length(dim(y)) == 3){
+    for (i in 1:32){
+      r <- c(  r, R2(y[,i,], yhat[,i,])  )
+    }  
+  }
+  else if (length(dim(y)) == 2){
+    for (i in 1:32){
+      r <- c(  r, R2(y[,i], yhat[,i])  )
+    }
+  }
+  rValue <- data.frame( matrix(nrow = 33, ncol = 2) )
+  names(rValue) <- c('Timestep','R_Squared')
+  rValue[,2] <- r
+  rValue[,1] <- c('All', str_pad( as.character(1:32), width = 2, side = 'left', pad = '0' ) )
+  return(rValue)
+}
+```
+
+### Check and Wrangle Data
+
+The dataset comes clean, with no NA values.  We're simply going to add two new columns.  The first is the price change compared to 64 days ago.  I'm using a batch size of 64, and I suspect that the 64-day change might have some relationship to dividing lines that could break an LSTM model.  We're also adding an id column to make it a little easier to for placing those dividing lines.
+
+Looking at the data, the price of oil has ranged from 9.10 to 143.95.  Half of all 64-day price changes are mild, between -2.42 and 4.39; but there are also some extreme rises and rops: one of -68.89--nearly half the maximum price oil reached.
+
+```{r, load_and_clean_data, message=FALSE, warning=FALSE}
+# LOAD
 oil <- read_csv('C:\\Users\\Christopher\\Desktop\\Data\\oil_prices.csv')
-```
-```{r}
-head(oil)
-```
-
-```{r warning=FALSE}
+# CLEAN
 oil <- oil %>%
   rename(price = DCOILBRENTEU) %>%
   mutate(price = as.numeric(price)) %>%
@@ -50,7 +78,20 @@ oil <- oil %>%
 summary(oil)
 ```
 
-```{r}
+# Does Inclusion of Validation Data Matter?
+
+We are creating four seperate models to test the advantages of including validation data and dropout layers.  The first model will have 11 validation batches (about 10% of the data) and two dropout layers.  The second and third will have two validation batches each, but one will include dropout layers and the other will not.  The last model will include neither dropout layers nor validation data.
+
+We will also be using a batch size of 64, and try to predict 32 days in the future.  All models will use 60 epochs, which seemed to work best in experimentation.
+
+```{r, model_table}
+mtable <- data.frame(  matrix( c('m11v','m2v','.','.','sm2v','simple'), ncol = 2 )  )
+names(mtable) <- c('with_dropout','no_dropout')
+row.names(mtable) <- c('11 val batches','2 val batches','no val batches')
+mtable
+```
+
+```{r, create_past_and_future}
 timesteps = 32
 batch_size = 64
 epochs = 60
@@ -83,7 +124,6 @@ future <- array(future,c(dim(future)[1], dim(future)[2], 1))
 past <- array(past,c(dim(past)[1], dim(past)[2], 1))
 ```
 
-
 ```{r, batch_parameters}
 train_share <- 0.90
 batches <- dim(future)[1] / batch_size
@@ -96,171 +136,126 @@ future_start <- test_end +1
 future_end <- dim(future)[2]
 ```
 
-```{r warning=FALSE}
-model_11v <- keras_model_sequential() %>%
-  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-  layer_dropout(0.2) %>%
-  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-  layer_dropout(0.2) %>%
-  layer_dense(1)
+```{r, load_dropout_models, warning=FALSE}
+target_dir <- path_wd('data','model_11v', ext = 'hdf5')  # works differently in notebooks vs scripts
+model_11v <- load_model_hdf5(target_dir)
+target_dir <- path_wd('data','model_2v', ext = 'hdf5')
+model_2v <- load_model_hdf5(target_dir)
 summary(model_11v)
-# dropout of 0.5 too high, stick to 0.2 or lower
 ```
 
-```{r, model_2v}
-model_2v <- model_11v
-summary(model_2v)
-```
-```{r, simple_model}
-simple_model <- keras_model_sequential() %>%
-  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-  layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-  layer_dense(1)
-simple_model_2v <- simple_model
+```{r, load_simple_models}
+target_dir <- path_wd('data','simple_model', ext = 'hdf5')
+simple_model <- load_model_hdf5(target_dir)
+target_dir <- path_wd('data','simple_model_2v', ext = 'hdf5')
+simple_model_2v <- load_model_hdf5(target_dir)
 summary(simple_model)
 ```
 
-```{r}
-train_X <- past[1:train_end,,]
-train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
-
-train_y <- future[1:train_end,,]
-train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
-
-#test_X <- past[test_start:test_end,,]
-#test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
-
-#test_y <- future[test_start:test_end,,]
-#test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+```{r, load_training_histories}
+target_dir <- path_wd('data','m11v_hist', ext = 'rdata')
+m11v_hist <- list.load(target_dir)
+target_dir <- path_wd('data','m2v_hist', ext = 'rdata')
+m2v_hist <- list.load(target_dir)
+target_dir <- path_wd('data','sm_hist', ext = 'rdata')
+sm_hist <- list.load(target_dir)
+target_dir <- path_wd('data','sm2v_hist', ext = 'rdata')
+sm2v_hist <- list.load(target_dir)
 ```
 
+```{r, plot_training_histories, fig.height = 10, fig.width = 8}
+layout( matrix(c(1,2), nrow = 2) )
+col = hcl(  h = seq(30, to = 210, by = 90), alpha = 0.95  )
+plot(  x = c(1,epochs), y = range( c(m11v_hist$metrics$val_loss, m2v_hist$metrics$val_loss, sm2v_hist$metrics$val_loss) ), type = 'n', xlab = 'epoch', ylab = 'val loss', main = 'Validation Loss for Models with Validation Data'  )
+text(x = 50, y = 0.010 - c(0:2)/1400, labels = c('m11v', 'm2v', 'sm2v'), col = col, cex=1.1 )
+points(  1:epochs, m11v_hist$metrics$val_loss, col = col[1], pch = 19  )
+points(  1:epochs, m2v_hist$metrics$val_loss, col = col[2], pch = 19  )
+points(  1:epochs, sm2v_hist$metrics$val_loss, col = col[3], pch = 19  )
+abline(v = 34)
 
-```{r}
-# setting verbose = 0, as otherwise the output is excessive.  Using beepr to give audible progress update
-model_11v %>% 
-  compile(
-    loss = 'mse',
-    optimizer = 'adam'
-) %>%
-  fit(
-    epochs = epochs,
-    batch_size = batch_size,
-    x = train_X,
-    y = train_y,
-    validation_split = (11 / 111),
-    verbose = 0,
-  )
-beep(11)
-model_2v %>%
-    compile(
-    loss = 'mse',
-    optimizer = 'adam'
-) %>%
-  fit(
-    epochs = epochs,
-    batch_size = batch_size,
-    x = train_X,
-    y = train_y,
-    validation_split = (2 / 111),
-    verbose = 0
-#    validation_data = c(test_X, test_y)
-  )
-beep(11)
-simple_model %>% 
-  compile(
-    loss = 'mse',
-    optimizer = 'adam'
-) %>%
-  fit(
-    epochs = epochs,
-    batch_size = batch_size,
-    x = train_X,
-    y = train_y,
-    verbose = 0
-  )
-beep(11)
-simple_model_2v %>%
-  compile(
-    loss = 'mse',
-    optimizer = 'adam'
-) %>%
-  fit(
-    epochs = epochs,
-    batch_size = batch_size,
-    x = train_X,
-    y = train_y,
-    validation_split = 2 / 111,
-    verbose = 0
-  )
-beep(8)
+col = hcl(  h = seq(30, to = 300, by = 90), alpha = 0.95  )
+plot(  x = c(1,epochs), y = range( c(m11v_hist$metrics$val_loss, m2v_hist$metrics$val_loss, sm2v_hist$metrics$val_loss) ), type = 'n', xlab  = 'epoch', ylab = 'loss', main = 'Loss for All Trained Models'  )
+text(x = 50, y = 0.010 - c(0:3)/1400, labels = c('m11v', 'm2v', 'sm2v', 'simple'), col = col, cex= 1.1 )
+points(  1:epochs, m11v_hist$metrics$loss, col = col[1], pch = 19  )
+points(  1:epochs, m2v_hist$metrics$loss, col = col[2], pch = 19  )
+points(  1:epochs, sm2v_hist$metrics$loss, col = col[3], pch = 19  )
+points(  1:epochs, sm_hist$metrics$loss, col = col[4], pch = 19  )
+abline(v = 34)
 ```
 
+## Model Performance
 
-```{r}
+### Loss vs Epoch
+
+Looking at the validation loss for the data, m11v performs noticeably worse than m2v and sm2v--which are almost indistinguishable from one another.  however, when looking at the loss data, m11v starts out as the worst, but gradually surpasses m2v by 34 epochs.  Further, the simple model seems to perform slightly better than sm2v, thoug hafter 25 epochs they are almost indistinguishable.
+
+```{r, create_test_data_and_predictions}
 test_X <- past[test_start:test_end,,]
 test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
 
 test_y <- future[test_start:test_end,,]
 test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
 
-pred_11v <- predict(model_11v, test_X, batch_size = 64)
-pred_2v <- predict(model_2v, test_X, batch_size = 64)
-pred_simple <- predict(simple_model, test_X, batch_size = 64)
-pred_simple_2v <- predict(simple_model_2v, test_X, batch_size = 64)
+# easier to deal wtih two dimensions, do not need third for now
+future <- future[,,1]
+pred_11v <- predict(model_11v, past, batch_size = 64)
+pred_11v <- pred_11v[,,1]
+pred_2v <- predict(model_2v, past, batch_size = 64)
+pred_2v <- pred_2v[,,1]
+pred_simple <- predict(simple_model, past, batch_size = 64)
+pred_simple <- pred_simple[,,1]
+pred_simple_2v <- predict(simple_model_2v, past, batch_size = 64)
+pred_simple_2v <- pred_simple_2v[,,1]
 ```
 
-```{r}
-losses <- rep(NaN, 3)
-losses[1] <- model_11v %>%
+### Model Loss Bar Chart
+
+As we move from the training set to testing set, it is interesting to see that the sharper distinctions in from the models' training histories are not as easily distinguished when using the testing set; though, m2v does perform slightly better.
+
+```{r message=FALSE, warning=FALSE}
+
+losses <- data.frame( matrix(c(rep( c(NA,NaN), each = 4 ) ), nrow = 4, ncol = 2) )
+names(losses) <- c('model','loss')
+losses$model <- c('m11v','m2v','sm2v','simple')
+losses[1,2] <- model_11v %>%
   evaluate(batch_size = 64,test_X, test_y)
-losses[2] <- model_2v %>%
+losses[2,2] <- model_2v %>%
   evaluate(batch_size = 64,test_X, test_y)
-losses[3] <- simple_model %>%
+losses[3,2] <- simple_model %>%
   evaluate(batch_size = 64,test_X, test_y)
-losses[4] <- simple_model_2v %>%
+losses[4,2] <- simple_model_2v %>%
   evaluate(batch_size = 64,test_X, test_y)
-print(  paste( 'Losses for model with 11 validation batches, and  2 dropout layers:', losses[1] )  )
-print(  paste( 'Losses for model with  2 validation batches, and  2 dropout layers:', losses[2] )  )
-print(  paste( 'Losses for model with no validation batches, and no dropout layers:', losses[3] )  )
-print(  paste( 'Losses for model with  2 validation batches, but no dropout layers:', losses[4] )  )
+
+p <- ggplot(  data = losses, aes( x = model, y = loss, fill = model )  ) + geom_bar(stat = 'identity') + theme_minimal()
+p
 ```
 
-```{r}
-R2 <- function(y, yhat){
-  return((1 - sum( ( y - yhat )^2 ) / sum( ( y - mean(y) )^2 ) ) * 100)
-}
-Rowwise_R2<- function(y, yhat, steps){
-  print(paste('R-Squared for all test data:', R2(y, yhat ) ) )
-  if (length(dim(y)) == 3){
-    for (i in 1:32){
-      print(paste('At',i,'R-Squared:',R2(y[,i,], yhat[,i,])))
-    }  
-  }
-  else if (length(dim(y)) == 2){
-    for (i in 1:32){
-      print(paste('At',i,'R-Squared:',R2(y[,i], yhat[,i])))
-    }    
-  }
-}
-```
+### Bar Chart of R-Squared by Day
 
-```{r}
-print('For 11 Validation Batches')
-Rowwise_R2(future[test_start:test_end,,], pred_11v[test_start:test_end,,] )
-print('')
-print('For 2 Validation Batches')
-Rowwise_R2(future[test_start:test_end,,], pred_2v[test_start:test_end,,] )
-print('')
-print('For No Validation Batches')
-Rowwise_R2(future[test_start:test_end,,], pred_simple[test_start:test_end,,] )
-print('')
-print('For 2 Validation Batches But No Dropout Layer')
-Rowwise_R2(future[test_start:test_end,,], pred_simple_2v[test_start:test_end,,] )
+To normalize the results somewhat, we will shift from Mean Squared Error to R-Squared; and rather than look at MSE for the entire test-set at once, we will instead look at them by day.  Unsurpringly, all of the models perform worse as they try to predict further into the future (with one exception for day 2).  That said, the two models with dropout layers, m11v and m2v, show some interesting behavior.  Model m2v is the best model overall and at the start, but it is not so at the end.  Rather, it is surpassed by m11v at 21 days, despite m11v being the worst overall model and at the beginning.
+
+Including more validation data and dropout data may harm short-term predictions, but it helps when making longterm predictions--and it is likely the longterm predictions we are most interested in.  It could be that the inclusion of dropout layers and more validation layers helps prevent the model from getting caught up in very short-term patterns, allowing it to instead train more on mid-term patterns.
+
+```{r, results = FALSE, fig.height=8, fig.width=12, message=FALSE, warning=FALSE}
+rVals <- rbind(  Rowwise_R2( future[test_start:test_end,], pred_11v      [test_start:test_end,] ),
+                 Rowwise_R2( future[test_start:test_end,], pred_2v       [test_start:test_end,] ),
+                 Rowwise_R2( future[test_start:test_end,], pred_simple_2v[test_start:test_end,] ),
+                 Rowwise_R2( future[test_start:test_end,], pred_simple   [test_start:test_end,] )  )
+
+rVals <- cbind(  rVals, rep( c('m11v','m2v','sm2v','simple'), each = 33 )  )
+names(rVals)[3] <- 'Model'
+
+p <- ggplot(  data = rVals, aes(x = Timestep, y = R_Squared, fill = Model)  ) +
+  geom_bar( stat = 'identity', position = position_dodge() ) + scale_y_continuous() + 
+  theme_minimal()
+p
 ```
 
 ```{r, tensorplot}
-tensorplot <- function(y, yhat, xStart = 1, xEnd = NA,x = NA, ySlice = NA, actual = 1){
+tensorplot <- function(y, yhat, xStart = 1, xEnd = NA,x = NA, ySlice = NA, actual = 1,...){
   timesteps <- dim(y)[2]
+  if (length(dim(y))==3){y <- y[,,1]}
+  if (length(dim(yhat))==3){yhat <- yhat[,,1]}
   if (all(is.na(xEnd) ) ){
     len <- dim(y)[1]
     xEnd <- dim(y)[1] + dim(y)[2] -1
@@ -271,194 +266,46 @@ tensorplot <- function(y, yhat, xStart = 1, xEnd = NA,x = NA, ySlice = NA, actua
   }
   if (all(is.na(x) ) ){
     x = xStart:xEnd
-    print(length(x))
   }
   if (all(is.na(ySlice) ) ){
     ySlice = 1:dim(y)[2]
   }
-  yRange <- range(c(range(y[,ySlice,1], na.rm = TRUE),range(yhat[,ySlice,1], na.rm = TRUE)))
+  yRange <- range(c(range(y[,ySlice], na.rm = TRUE),range(yhat[,ySlice], na.rm = TRUE)))
 #  print(yRange)
-  plot(range(x), yRange, type = 'n')
+  plot(range(x), yRange, type = 'n',...)
   increment <- 360 / length(ySlice)
   hue <- 0
   for (i in ySlice){
     ends <- timesteps - i
     col <- hcl(h = hue, c = 50, l = 85, alpha = 0.15)
-    print(length((xStart + ends):(len + ends)))
-    print(length(unlist(yhat[xStart:len,i,1])))
-    points((xStart + i):(len + i), unlist(yhat[xStart:len,i,1]), col = col, pch = 19, cex = 1.2)
+    points((xStart + i):(len + i), unlist(yhat[xStart:len,i]), col = col, pch = 19, cex = 1.2)
     hue = hue + increment
   }
   i <- 1
   ends <- timesteps - i
   col <- 'black'
-  lines((xStart + i):(len + i), unlist(y[xStart:len,i,1]), col = col)
+  lines((xStart + i):(len + i), unlist(y[xStart:len,i]), col = col)
 }
 ```
 
-```{r}
-tensorplot(future, pred_2v, xStart = test_start, ySlice = c(2) )
-tensorplot(future, pred_11v, xStart = test_start, ySlice = c(2) )
-tensorplot(future, pred_simple, xStart = test_start, ySlice = c(2) )
-tensorplot(future, pred_simple_2v, xStart = test_start, ySlice = c(2) )
+```{r, fig.height = 10, fig.width = 8}
+layout(matrix(1:4, nrow = 2))
+tensorplot(future, pred_2v, xStart = test_start, ySlice = c(5), main = 'Model m2v 5-Day Predictions vs Reality' )
+tensorplot(future, pred_11v, xStart = test_start, ySlice = c(5), main = 'Model m11v 5-Day Predictions vs Reality' )
+tensorplot(future, pred_simple, xStart = test_start, ySlice = c(5), main = 'Model simple 5-Day Predictions vs Reality' )
+tensorplot(future, pred_simple_2v, xStart = test_start, ySlice = c(5), main = 'Model sm2v 5-Day Predictions vs Reality' )
 #tensorplot(future, future, xStart = test_start, xEnd = 7000, ySlice = c(15) )
 ```
 
-## Initial Results w/ Validation Data
-
-Splitting the training data into training and validation data does not seem to affect performance unless a dropout layer is included.  However, doing so in this case at lest is resulting in significantly worse performance.   
-
-```{r}
-tensorplot(future, simple_pred, xStart = test_start, ySlice = c(2) )
-```
 # Breaking Attempt
 
-The data suggests a breaking point around 5810 to 5928 would be a good place to try to break the model, so we will try breaking our model here.  So far, we have been using 60 epochs, but if we were to test 100 points within that range, that would be the equivalent of 6000 epochs--far too many.  Instead, we'll select two points to run the model, choose the one that performs worst (the goal is to find a breaking point after all), then select two more models near that point.
+The data suggests a breaking point around 5665 to 5793 would be a good place to try to break the model, so we will try breaking our model here.  This range is the equivalent of two batches (128).  Rather than test every possible dividing poitn in then, which would require the equivalent of 7680 epochs, we will be doing a binary search for the worst possible model in that range, so we will only have to do the equivalent of 60 * log2 128, or 420 epochs across seven models.
 
-BUILD A HEAP
-
-```{r, test_model}
-quick_model <- function(dropout = FALSE){
-  if (dropout){
-    model <- keras_model_sequential() %>%
-    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-    layer_dropout(0.2) %>%
-    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-    layer_dropout(0.2) %>%
-    layer_dense(1)
-  }
-  else{
-    model <- keras_model_sequential() %>%
-    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-    layer_lstm(10, batch_input_shape = c(64,32,1),stateful = TRUE, return_sequences = TRUE) %>%
-    layer_dense(1)
-  }
-  return(model)
-}
-```
-
-```{r}
-# starting wtih 6 epochs for testing...will increase to 60 when time to actually run this
-break_iteration <- function ( train_X, train_y, val_batches = 0, batch_size = 64, epochs = 60, noisy = FALSE, ...){
-  dropout <- (val_batches > 0 )
-  model <- quick_model(dropout)
-  model %>%
-    compile(
-    loss = 'mse',
-    optimizer = 'adam'
-    ) %>%
-    fit(
-      epochs = epochs,
-      batch_size = batch_size,
-      x = train_X,
-      y = train_y,
-      validation_split = (val_batches / train_batches),
-      ...
-    )
-  if (noisy){
-    beep(sound = 11)
-  }
-  return(model)
-}
-```
-
-
-```{r}
-#divide = 5810
-divide = 5665
-step = 64
-train_batches = as.integer(divide / batch_size)
-test_batches = 100 - train_batches
-
-dr = divide + step # divide right, or in the first case, center
-
-start <- dr - batch_size * train_batches
-end <- dr + test_batches * batch_size - 1
-
-train_X <- past[start:(dr - 1),,]
-train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
-
-train_y <- future[start:(dr - 1),,]
-train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
-
-test_X <- past[dr: end,,]
-test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
-
-test_y <- future[dr:end,,]
-test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
-
-
-m <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE)
-center_loss <- m %>%
-  evaluate(batch_size = 64, test_X, test_y, verbose = 0)
-worst <- m
-
-step <- 32
-old_divide <- dr
-while (step >= 1){
-  # set divide left and divide right
-  dl <- old_divide - step
-  dr <- old_divide + step
-
-  # check left
-  start <- dl - batch_size * train_batches
-  end <- dl + test_batches * batch_size -1
-
-  train_X <- past[start:(dl - 1),,]
-  train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
-  
-  train_y <- future[start:(dl - 1),,]
-  train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
-  
-  test_X <- past[dl: end,,]
-  test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
-  
-  test_y <- future[dl:end,,]
-  test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
-  
-  ml <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE )
-  left_loss <- ml %>%
-    evaluate(batch_size = 64,test_X, test_y)
-
-  # check right
-  start <- dr - batch_size * train_batches
-  end <- dr + test_batches * batch_size -1
-  
-  train_X <- past[start:(dr - 1),,]
-  train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
-  
-  train_y <- future[start:(dr - 1),,]
-  train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
-  
-  test_X <- past[dr: end,,]
-  test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
-  
-  test_y <- future[dr:end,,]
-  test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
-  
-  mr <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE )
-  right_loss <- mr %>%
-    evaluate(batch_size = 64,test_X, test_y)
-  
-  # compare and updade
-  losses <- c(center_loss, left_loss, right_loss)
-  if (  left_loss == max(losses)  ){
-    old_divide <- dl
-    center_loss <- left_loss
-    worst <- ml
-  }
-  else if (  right_loss == max(losses)  ){
-    old_divide <- dr
-    center_loss <- right_loss
-    worst <- mr
-  }
-  step <- step / 2
-}
-beep(sound = 3)
-wait(3)
-beep(sound = 4)
-
-
+```{r, load_wost_model_and_hist}
+target_dir <- path_wd('data','wm_hist', ext = 'rdata')
+worst_hist <- list.load(target_dir)
+target_dir <- path_wd('data','worst_model', ext = 'hdf5')
+worst_hist <- load_model_hdf5(target_dir)
 ```
 
 ```{r}
@@ -466,12 +313,12 @@ center_loss
 old_divide
 start <- old_divide - batch_size * train_batches
 end <- old_divide + test_batches * batch_size -1
-  
+
 test_X <- past[old_divide: end,,]
-test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+#test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
   
-test_y <- future[old_divide:end,,]
-test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+test_y <- future[old_divide:end,]
+#test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2]))
 
 yhat <- predict(worst, test_X, batch_size = 64)
 Rowwise_R2(test_y, yhat)
@@ -483,6 +330,46 @@ plot(oil[,c(4,2)], col = col, pch = 19, cex = 0.5)
 abline(v = old_divide)
 ```
 
+```{r}
+target_dir <- path_wd('data','worst_model', ext = 'hdf5')
+worst_model <- load_model_hdf5(target_dir)
+target_dir <- path_wd('data','wm_hist', ext = 'rdata')
+worst_hist <- list.load(target_dir)
+```
+
+```{r}
+worst_frame <- data.frame(  matrix(NaN, ncol = 2, nrow = length(worst_hist$metrics$loss) )  )
+worst_frame[,1] <- 1:nrow(worst_frame)
+worst_frame[,2] <- worst_hist$metrics$loss
+names(worst_frame) <- c('epoch', 'loss')
+#worst_hist$metrics$loss
+ggplot(data = worst_frame, aes(x = epoch,y = loss)) + geom_bar(stat = 'identity')
+```
+
+```{r}
+divide <- worst_hist$center
+train_batches <- 88
+test_batches <- 12
+batch_size <- 64
+
+start <- divide <- worst_hist$center - batch_size * train_batches
+end <- divide + test_batches * batch_size -1
+
+test_X <- past[divide: end,,]
+test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+
+test_y <- future[divide:end,,]
+test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+worst_pred <- predict(worst_model, test_X, batch_size = batch_size)
+```
+
+```{r, fig.height = 10, fig.width = 10}
+worst_frame<-Rowwise_R2(test_y, worst_pred)
+ggplot(data = worst_frame, aes(y = R_Squared, x = Timestep, fill = R_Squared, col = R_Squared) ) + geom_bar(stat = 'identity')
+```
+## R^2 Values
+
+This...is curious.  While I had intended to choose
 
 ```{r}
 plot(oil[(divide):(divide + 128),c(4,2)])
@@ -498,11 +385,9 @@ abline(v = 5665, col = 'blue')
 abline(v = 5665 + 128, col = 'blue')
 ```
 
-## Prelimary Findings
+## Preliminary Findings
 
-Looking at the data, it would seem that placing the division point at the start of a spike is the most effective way to break an LSTM model.  
-
-
+Looking at the data, it would seem that placing the division point at the start of a spike is the most effective way to break an LSTM model.  Not only are the R-Squared values for the worst model bad, they are negative.  This is despite earlier good performance with other dividing lines.  
 
 ## Simulating Data
 

@@ -1,0 +1,99 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r, load_libraries, warning=FALSE}
+library(readr)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+print(paste('Done',today()))
+```
+
+```{r, load_data, message=FALSE, warning=FALSE}
+oil <- read_csv('C:\\Users\\Christopher\\Desktop\\Data\\oil_prices.csv')
+head(oil)
+```
+
+```{r, preliminary_plot, message=FALSE, warning=FALSE}
+plot(oil)
+```
+```{r, check_NAs}
+print(paste('There are',sum(is.na(oil)), 'NAs in the dataset'))
+```
+
+```{r, shape_data_and_give_summary, warning=FALSE}
+oil <- oil %>%
+  rename(price = DCOILBRENTEU) %>%
+  mutate(price = as.numeric(price)) %>%
+  mutate(change1_days = lag(price, 1) ) %>%
+#  mutate(change64_days = lag(price, 64) ) %>%
+  drop_na() %>%
+#  mutate (change64_days = price - change64_days ) %>%
+  mutate (change1_days = price - change1_days )
+
+oil <- oil %>%
+  mutate (id = 1:nrow(oil) )
+summary(oil)
+```
+```{r, fig.height = 16}
+layout(matrix(data = c(1:2), ncol = 1) )
+plot(oil[,c(4,2)])
+plot(oil[,c(4,3)])
+abline(h = 0, col = 'red')
+```
+
+## Where to divvy up
+
+First massive spikes around 750 looks good, but too early for being able to train data.
+Shifts around 5500 look sharp enough--but we want a new median after bouncing back.
+The spike a little after 6000 could work out.
+Not sure about post-5500 shifts.
+
+
+```{r warning=FALSE, fig.height=16}
+layout(matrix(data = c(1:2), ncol = 1) )
+plot(oil[3150:3300,c(4,2)])
+plot(oil[3150:3300,c(4,3)])
+abline(h = 0, col = 'red')
+```
+
+```{r, fig.height = 16}
+placement1 = 5810
+placement2 = placement1 + 64
+placement3 = placement2 + 64
+layout(matrix(data = c(1:2), ncol = 1) )
+plot(oil[4500:6500,c(4,2)])
+abline(v = placement1, col = 'blue')
+abline(v = placement2, col = 'blue')
+abline(v = placement3, col = 'blue')
+
+plot(oil[4500:6500,c(4,3)])
+abline(h = 0, col = 'red')
+abline(v = placement1, col = 'blue')
+abline(v = placement2, col = 'blue')
+abline(v = placement3, col = 'blue')
+
+```
+```{r, fig.height = 16}
+layout(matrix(data = c(1:2), ncol = 1) )
+plot(oil[5250:5750,c(4,2)])
+plot(oil[5250:5750,c(4,3)])
+abline(h = 0, col = 'red')
+```
+
+
+```{r, fig.height = 16}
+layout(matrix(data = c(1:2), ncol = 1) )
+plot(oil[6000:6400,c(4,2)])
+plot(oil[6000:6400,c(4,3)])
+abline(h = 0, col = 'red')
+#print(oil$id[6000:6400])
+```
+
+
+```{r}
+library(tensorflow)
+```
+

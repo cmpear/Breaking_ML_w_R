@@ -1,0 +1,181 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+# setting verbose = 0, as otherwise the output is excessive.  Using beepr to give audible progress update
+m11v_hist<-model_11v %>% 
+  compile(
+    loss = 'mse',
+    optimizer = 'adam'
+) %>%
+  fit(
+    epochs = epochs,
+    batch_size = batch_size,
+    x = train_X,
+    y = train_y,
+    validation_split = (11 / 111),
+    verbose = 0
+  )
+beep(11)
+m2v_hist<-model_2v %>%
+    compile(
+    loss = 'mse',
+    optimizer = 'adam'
+) %>%
+  fit(
+    epochs = epochs,
+    batch_size = batch_size,
+    x = train_X,
+    y = train_y,
+    validation_split = (2 / 111),
+    verbose = 0
+#    validation_data = c(test_X, test_y)
+  )
+beep(11)
+sm_hist<-simple_model %>% 
+  compile(
+    loss = 'mse',
+    optimizer = 'adam'
+) %>%
+  fit(
+    epochs = epochs,
+    batch_size = batch_size,
+    x = train_X,
+    y = train_y,
+    verbose = 0
+  )
+beep(11)
+sm2v_hist<-simple_model_2v %>%
+  compile(
+    loss = 'mse',
+    optimizer = 'adam'
+) %>%
+  fit(
+    epochs = epochs,
+    batch_size = batch_size,
+    x = train_X,
+    y = train_y,
+    validation_split = 2 / 111,
+    verbose = 0
+  )
+beep(8)
+
+m11v_hist <- c(m11v_hist, center = test_start)
+m2v_hist <- c(m2v_hist, center = test_start)
+sm_hist <- c(sm_hist, center = test_start)
+sm2v_hist <- c(sm2v_hist, center = test_start)```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+```
+
+
+```{r}
+```{r}
+#divide = 5810
+divide = 5665
+step = 64
+train_batches = as.integer(divide / batch_size)
+test_batches = 100 - train_batches
+
+dr = divide + step # divide right, or in the first case, center
+
+start <- dr - batch_size * train_batches
+end <- dr + test_batches * batch_size - 1
+
+train_X <- past[start:(dr - 1),,]
+train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
+
+train_y <- future[start:(dr - 1),,]
+train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
+
+test_X <- past[dr: end,,]
+test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+
+test_y <- future[dr:end,,]
+test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+
+
+m <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE)
+center_loss <- m %>%
+  evaluate(batch_size = 64, test_X, test_y, verbose = 0)
+worst <- m
+
+step <- 32
+old_divide <- dr
+while (step >= 1){
+  # set divide left and divide right
+  dl <- old_divide - step
+  dr <- old_divide + step
+
+  # check left
+  start <- dl - batch_size * train_batches
+  end <- dl + test_batches * batch_size -1
+
+  train_X <- past[start:(dl - 1),,]
+  train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
+  
+  train_y <- future[start:(dl - 1),,]
+  train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
+  
+  test_X <- past[dl: end,,]
+  test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+  
+  test_y <- future[dl:end,,]
+  test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+  
+  ml <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE )
+  left_loss <- ml %>%
+    evaluate(batch_size = 64,test_X, test_y)
+
+  # check right
+  start <- dr - batch_size * train_batches
+  end <- dr + test_batches * batch_size -1
+  
+  train_X <- past[start:(dr - 1),,]
+  train_X <- array(train_X,c(dim(train_X)[1], dim(train_X)[2], 1))
+  
+  train_y <- future[start:(dr - 1),,]
+  train_y <- array(train_y,c(dim(train_y)[1], dim(train_y)[2], 1))
+  
+  test_X <- past[dr: end,,]
+  test_X <- array(test_X,c(dim(test_X)[1], dim(test_X)[2], 1))
+  
+  test_y <- future[dr:end,,]
+  test_y <- array(test_y,c(dim(test_y)[1], dim(test_y)[2], 1))
+  
+  mr <- break_iteration( train_X, train_y, verbose = 0, noisy = TRUE )
+  right_loss <- mr %>%
+    evaluate(batch_size = 64,test_X, test_y)
+  
+  # compare and updade
+  losses <- c(center_loss, left_loss, right_loss)
+  if (  left_loss == max(losses)  ){
+    old_divide <- dl
+    center_loss <- left_loss
+    worst <- ml
+  }
+  else if (  right_loss == max(losses)  ){
+    old_divide <- dr
+    center_loss <- right_loss
+    worst <- mr
+  }
+  step <- step / 2
+}
+beep(sound = 3)
+wait(3)
+beep(sound = 4)
+
+
+```
+```
+
